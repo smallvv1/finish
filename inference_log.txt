@@ -1,0 +1,108 @@
+===== 配件文字识别（真实输出）=====
+
+========== 1 (2).jpg ==========
+[die 1] 识别文字：TT0 TH20
+[die 2] 识别文字：THL TH26
+[die 3] 识别文字：TH25 TH25
+[tool 4] 识别文字：− 3 2 O 0 Quation 3
+[die 5] 识别文字：1HTA TH12
+[die 6] 识别文字：THHE TH16
+
+========== 1.jpg ==========
+===== 配件文字识别（海康相机输出）=====
+
+========== capture_clear_20260417_145850.jpg ==========
+[die 1] 识别文字：TH20 TH20
+[die 2] 识别文字：TH26 TH26
+[die 3] 识别文字：TH12 TH12
+[die 4] 识别文字：TH25
+
+===== 配件文字识别（海康相机输出）=====
+
+========== capture_clear_20260417_154736.jpg ==========
+[die 1] 识别文字：TH20 TH20
+[die 2] 识别文字：TH25 TH25
+[die 3] 识别文字：TLG TH26
+[die 4] 识别文字：TH12 TH12
+[tool 5] 识别文字：THTA
+
+========== capture_clear_20260417_145850.jpg ==========
+[die 1] 识别文字：TH20 TH20
+[die 2] 识别文字：TH26 TH26
+[die 3] 识别文字：TH12 TH12
+[die 4] 识别文字：TH25
+
+===== 閰嶄欢鏂囧瓧璇嗗埆锛堟捣搴风浉鏈鸿緭鍑猴級=====
+
+===== 閰嶄欢鏂囧瓧璇嗗埆锛堟捣搴风浉鏈鸿緭鍑猴級=====
+
+========== capture_clear_20260424_171115.jpg ==========
+[tool 1] OCR text: Q 7. equalion
+[die 2] OCR text: 
+[die 3] OCR text: 
+[die 4] OCR text: 
+[die 5] OCR text: 
+[die 6] OCR text: 
+
+========== capture_clear_20260424_171036.jpg ==========
+===== 配件文字识别（海康相机输出）=====
+
+========== capture_clear_20260424_171115.jpg ==========
+[tool 1] 识别文字：Q 7. equalion
+[die 2] 识别文字：
+[die 3] 识别文字：
+[die 4] 识别文字：
+[die 5] 识别文字：
+[die 6] 识别文字：
+
+========== capture_clear_20260424_171036.jpg ==========
+[tool 1] 识别文字：: equallon X )
+[die 2] 识别文字：
+[die 3] 识别文字：
+[die 4] 识别文字：
+[die 5] 识别文字：
+[die 6] 识别文字：
+
+========== capture_clear_20260424_170659.jpg ==========
+[tool 1] 识别文字：98
+[die 2] 识别文字：
+[die 3] 识别文字：
+[die 4] 识别文字：
+[die 5] 识别文字：
+[die 6] 识别文字：
+
+========== capture_clear_20260424_170657.jpg ==========
+
+========== capture_clear_20260424_170656.jpg ==========
+[tool 1] 识别文字：92
+[die 2] 识别文字：
+[die 3] 识别文字：
+[die 4] 识别文字：
+[die 5] 识别文字：
+[die 6] 识别文字：
+
+========== capture_clear_20260424_170315.jpg ==========
+[tool 1] 识别文字：O eogon
+[die 2] 识别文字：TH12
+[die 3] 识别文字：TH25 THHG
+[die 4] 识别文字：TH26 THH
+[die 5] 识别文字：TH16 T1H
+
+========== capture_clear_20260424_170313.jpg ==========
+[tool 1] 识别文字：equation
+[die 2] 识别文字：TH12 THL
+[die 3] 识别文字：TH25 THHG
+[die 4] 识别文字：TH26 THH
+[die 5] 识别文字：TH16 TH
+
+========== capture_clear_20260424_170307.jpg ==========
+[tool 1] 识别文字：3 O C equation
+[die 2] 识别文字：TH12 1HLE
+[die 3] 识别文字：TH25 THHG
+[die 4] 识别文字：TH26 THH
+[die 5] 识别文字：TH16 THH
+
+========== capture_clear_20260424_170242.jpg ==========
+===== 配件文字识别（海康相机输出）=====
+
+========== capture_clear_20260427_153420.jpg ==========

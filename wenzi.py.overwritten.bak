@@ -1,0 +1,285 @@
+import os
+import cv2
+import glob
+import argparse
+import time
+import threading
+import re
+from concurrent.futures import ThreadPoolExecutor
+from ultralytics import YOLO
+
+os.environ.setdefault("FLAGS_enable_pir_api", "0")
+os.environ.setdefault("FLAGS_enable_pir_in_executor", "0")
+os.environ.setdefault("FLAGS_use_mkldnn", "0")
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+
+from paddleocr import PaddleOCR
+
+MODEL_PATH   = r"D:\1\EzYOLO-main\runs\detect\runs\train\exp_2\weights\best.pt" # 使用原始字符串避免转义
+#IMAGE_FOLDER = r"D:\1000\pliers_images" # 使用原始字符串
+IMAGE_FOLDER = r"D:\1\EzYOLO-main"  # 默认为当前目录，扫描capture_clear_*.jpg
+
+CONF_THRESH  = 0.4
+OUTPUT_LOG   = os.path.join(os.path.dirname(__file__), "inference_log.txt")
+CAPTURE_PATTERN = "capture_clear_*.jpg"  # 匹配test_hk_opecv.py的输出文件
+# ====================================================
+
+# 初始化 OCR
+
+
+def _create_ocr_engine(enable_mkldnn=False):
+    return PaddleOCR(
+        use_textline_orientation=False,
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
+        lang="en",
+        enable_mkldnn=enable_mkldnn,
+    )
+
+
+ocr = _create_ocr_engine(enable_mkldnn=False)
+model = YOLO(MODEL_PATH)
+_thread_local = threading.local()
+_DIE_CLASS_ID = None
+
+
+def _extract_digits(text):
+    if not text:
+        return ""
+    return "".join(re.findall(r"\d", str(text)))
+
+
+def _get_die_class_id():
+    global _DIE_CLASS_ID
+    if _DIE_CLASS_ID is not None:
+        return _DIE_CLASS_ID
+    names = getattr(model, "names", None)
+    if isinstance(names, dict):
+        for class_id, class_name in names.items():
+            if str(class_name).lower() == "die":
+                _DIE_CLASS_ID = int(class_id)
+                return _DIE_CLASS_ID
+    return None
+
+
+def _resize_crop_for_ocr(crop, max_side=960):
+    h, w = crop.shape[:2]
+    longest = max(h, w)
+    if longest <= max_side:
+        return crop
+    ratio = max_side / float(longest)
+    new_w = max(1, int(w * ratio))
+    new_h = max(1, int(h * ratio))
+    return cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+
+def _get_thread_ocr():
+    if not hasattr(_thread_local, "ocr_engine"):
+        _thread_local.ocr_engine = _create_ocr_engine(enable_mkldnn=False)
+    return _thread_local.ocr_engine
+
+
+def _extract_text_with_engine(engine, crop):
+    try:
+        res = list(engine.predict(crop))
+    except Exception as e:
+        message = str(e)
+        if "ConvertPirAttribute2RuntimeAttribute" in message or "onednn" in message.lower():
+            try:
+                safe_engine = _create_ocr_engine(enable_mkldnn=False)
+                res = list(safe_engine.predict(crop))
+                try:
+                    _thread_local.ocr_engine = safe_engine
+                except Exception:
+                    pass
+            except Exception:
+                return ""
+        else:
+            return ""
+    text = ""
+    if res:
+        first = res[0]
+        if isinstance(first, dict) and first.get("rec_texts"):
+            text = " ".join(first["rec_texts"])
+        elif hasattr(first, "rec_texts") and getattr(first, "rec_texts"):
+            text = " ".join(first.rec_texts)
+        elif isinstance(first, list):
+            text = " ".join([line[1][0] for line in first if len(line) > 1 and len(line[1]) > 0])
+    return _extract_digits(text.strip())
+
+
+def _ocr_worker(task):
+    start = time.perf_counter()
+    engine = _get_thread_ocr()
+    text = _extract_text_with_engine(engine, task["crop"])
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    return {
+        "idx": task["idx"],
+        "cls_name": task["cls_name"],
+        "text": text,
+        "ocr_ms": elapsed_ms,
+    }
+
+
+def process_images_from_camera(
+    image_folder=None,
+    pattern=CAPTURE_PATTERN,
+    max_images=1,
+    min_conf=CONF_THRESH,
+    min_box_area=900,
+    ocr_workers=1,
+    max_die_boxes=2,
+):
+    """
+    处理海康相机拍摄的图像
+    Args:
+        image_folder: 图像所在文件夹，默认为当前目录
+        pattern: 匹配模式，默认为capture_clear_*.jpg
+        max_images: 处理最新N张图，默认1张（加速）
+        min_conf: 检测最小置信度
+        min_box_area: 检测框最小面积（像素）
+        ocr_workers: OCR并行线程数，默认1（不并行）
+        max_die_boxes: 每张图最多OCR的die框数量（按面积从大到小），默认2
+    """
+    if image_folder is None:
+        image_folder = IMAGE_FOLDER
+
+    total_start = time.perf_counter()
+    total_detect_ms = 0.0
+    total_ocr_ms = 0.0
+    
+    with open(OUTPUT_LOG, "a", encoding="utf-8") as log_file:
+        def log_line(message=""):
+            print(message)
+            log_file.write(f"{message}\n")
+
+        log_line("===== 配件文字识别（海康相机输出）=====")
+        log_line()
+
+        # 获取所有匹配模式的图片文件
+        file_pattern = os.path.join(image_folder, pattern)
+        image_files = sorted(glob.glob(file_pattern), key=os.path.getctime, reverse=True)
+        
+        if not image_files:
+            log_line(f"[WARN] 未找到匹配模式 '{pattern}' 的图片文件在 {image_folder}")
+            return
+
+        if max_images > 0:
+            image_files = image_files[:max_images]
+
+        log_line(f"[INFO] 本次处理图片数: {len(image_files)}")
+
+        # 遍历图片（从最新开始）
+        for img_path in image_files:
+            image_start = time.perf_counter()
+            filename = os.path.basename(img_path)
+            img = cv2.imread(img_path)
+            if img is None:
+                log_line(f"[WARN] 图片读取失败: {filename}，已跳过")
+                continue
+
+            die_class_id = _get_die_class_id()
+
+            detect_start = time.perf_counter()
+            detect_kwargs = {"conf": min_conf, "verbose": False, "imgsz": 640}
+            if die_class_id is not None:
+                detect_kwargs["classes"] = [die_class_id]
+            results = model(img, **detect_kwargs)
+            detect_ms = (time.perf_counter() - detect_start) * 1000.0
+            total_detect_ms += detect_ms
+
+            log_line(f"========== {filename} ==========")
+
+            tasks = []
+            # 逐个检测框识别文字
+            for idx, box in enumerate(results[0].boxes):
+                class_id = int(box.cls.item()) if box.cls is not None else -1
+                cls_name = results[0].names.get(class_id, str(class_id)) if class_id >= 0 else "unknown"
+                if cls_name.lower() != "die":
+                    continue
+
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                x1 = max(0, x1)
+                y1 = max(0, y1)
+                x2 = min(img.shape[1], x2)
+                y2 = min(img.shape[0], y2)
+
+                if x2 <= x1 or y2 <= y1:
+                    log_line(f"[{cls_name} {idx+1}] 检测框无效，已跳过")
+                    continue
+
+                area = (x2 - x1) * (y2 - y1)
+                if area < min_box_area:
+                    continue
+
+                crop = img[y1:y2, x1:x2]
+                crop = _resize_crop_for_ocr(crop, max_side=640)
+
+                tasks.append({"idx": idx + 1, "cls_name": cls_name, "crop": crop, "area": area})
+
+            if max_die_boxes and max_die_boxes > 0 and len(tasks) > max_die_boxes:
+                tasks = sorted(tasks, key=lambda item: item.get("area", 0), reverse=True)[:max_die_boxes]
+
+            ocr_start = time.perf_counter()
+            ocr_results = []
+            if tasks:
+                if ocr_workers > 1 and len(tasks) > 1:
+                    with ThreadPoolExecutor(max_workers=ocr_workers) as executor:
+                        ocr_results = list(executor.map(_ocr_worker, tasks))
+                else:
+                    for task in tasks:
+                        single_start = time.perf_counter()
+                        text = _extract_text_with_engine(ocr, task["crop"])
+                        ocr_results.append(
+                            {
+                                "idx": task["idx"],
+                                "cls_name": task["cls_name"],
+                                "text": text,
+                                "ocr_ms": (time.perf_counter() - single_start) * 1000.0,
+                            }
+                        )
+
+            ocr_ms = (time.perf_counter() - ocr_start) * 1000.0
+            total_ocr_ms += ocr_ms
+
+            for item in sorted(ocr_results, key=lambda x: x["idx"]):
+                display_text = item['text'] if item['text'] else "(无数字)"
+                log_line(f"[{item['cls_name']} {item['idx']}] 识别数字：{display_text} (OCR {item['ocr_ms']:.1f}ms)")
+
+            image_total_ms = (time.perf_counter() - image_start) * 1000.0
+            log_line(
+                f"[TIME] {filename} detect={detect_ms:.1f}ms ocr={ocr_ms:.1f}ms total={image_total_ms:.1f}ms "
+                f"boxes={len(tasks)} workers={ocr_workers}"
+            )
+
+            log_line()
+
+        total_ms = (time.perf_counter() - total_start) * 1000.0
+        log_line(
+            f"[TIME] 全部完成 detect_total={total_detect_ms:.1f}ms ocr_total={total_ocr_ms:.1f}ms "
+            f"overall={total_ms:.1f}ms"
+        )
+
+print(f"识别结果已保存到：{OUTPUT_LOG}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="wenzi OCR加速版")
+    parser.add_argument("--image-folder", default=IMAGE_FOLDER, help="图像目录")
+    parser.add_argument("--pattern", default=CAPTURE_PATTERN, help="文件匹配模式")
+    parser.add_argument("--max-images", type=int, default=1, help="仅处理最新N张图，默认1")
+    parser.add_argument("--min-conf", type=float, default=CONF_THRESH, help="检测最小置信度")
+    parser.add_argument("--min-box-area", type=int, default=900, help="OCR最小框面积")
+    parser.add_argument("--ocr-workers", type=int, default=1, help="OCR并行线程数，默认1")
+    parser.add_argument("--max-die-boxes", type=int, default=2, help="每张图最多OCR的die框数，默认2")
+    args = parser.parse_args()
+
+    process_images_from_camera(
+        image_folder=args.image_folder,
+        pattern=args.pattern,
+        max_images=args.max_images,
+        min_conf=args.min_conf,
+        min_box_area=args.min_box_area,
+        ocr_workers=max(1, args.ocr_workers),
+        max_die_boxes=max(1, args.max_die_boxes),
+    )

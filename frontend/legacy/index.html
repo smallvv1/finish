@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>工具箱缺失检测</title>
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --panel: #ffffff;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --ok: #138a36;
+      --warn: #b42318;
+      --primary: #005fcc;
+      --border: #d0d7e2;
+    }
+    body {
+      margin: 0;
+      font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+      background: linear-gradient(120deg, #eef3ff 0%, #f5f8fb 55%, #f0fff8 100%);
+      color: var(--text);
+    }
+    .wrap {
+      max-width: 1200px;
+      margin: 24px auto;
+      padding: 0 16px 32px;
+    }
+    .head {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px;
+      box-shadow: 0 8px 24px rgba(20, 33, 61, 0.08);
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 24px;
+    }
+    .sub {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .controls {
+      margin-top: 14px;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .divider {
+      width: 1px;
+      height: 26px;
+      background: var(--border);
+      margin: 0 2px;
+    }
+    button {
+      background: var(--primary);
+      border: none;
+      color: #fff;
+      border-radius: 10px;
+      padding: 10px 18px;
+      font-weight: 700;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    input[type="number"], input[type="file"] {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px;
+      font-size: 14px;
+      background: #fff;
+    }
+    input[type="number"] {
+      width: 90px;
+    }
+    .status {
+      margin-top: 10px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+    .cost {
+      margin-top: 6px;
+      font-size: 14px;
+      color: #334155;
+      font-weight: 700;
+    }
+    .alarm {
+      margin-top: 14px;
+      border-radius: 12px;
+      padding: 12px 14px;
+      font-weight: 700;
+      display: none;
+    }
+    .alarm.ok {
+      display: block;
+      color: #fff;
+      background: linear-gradient(90deg, #20854f, #2ea043);
+    }
+    .alarm.warn {
+      display: block;
+      color: #fff;
+      background: linear-gradient(90deg, #b42318, #d92d20);
+      animation: pulse 1s infinite;
+    }
+    @keyframes pulse {
+      0% { transform: scale(1); }
+      50% { transform: scale(1.01); }
+      100% { transform: scale(1); }
+    }
+    .grid {
+      margin-top: 16px;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow: 0 8px 24px rgba(20, 33, 61, 0.06);
+    }
+    .panel h2 {
+      margin: 0 0 8px;
+      font-size: 16px;
+    }
+    .imgbox {
+      width: 100%;
+      min-height: 280px;
+      border-radius: 10px;
+      border: 1px dashed var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      background: #fbfcff;
+    }
+    .imgbox img {
+      max-width: 100%;
+      height: auto;
+      display: none;
+    }
+    .hint {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    th, td {
+      border-bottom: 1px solid var(--border);
+      padding: 8px;
+      text-align: left;
+    }
+    th {
+      background: #f8fbff;
+      font-weight: 700;
+    }
+    .warn-txt {
+      color: var(--warn);
+      font-weight: 700;
+    }
+    .ok-txt {
+      color: var(--ok);
+      font-weight: 700;
+    }
+    @media (max-width: 900px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="head">
+      <div style="display:inline-block;padding:4px 10px;border-radius:999px;background:#fff1f2;border:1px solid #fecdd3;color:#b42318;font-weight:700;font-size:12px;margin-bottom:8px;">
+        旧版页面（非Vue）
+      </div>
+      <h1>工具箱缺失检测网页端</h1>
+      <p class="sub">支持两种方式：摄像头拍照检测 或 本地导入图片检测</p>
+      <div class="controls">
+        <label>摄像头索引：</label>
+        <input id="cameraIndex" type="number" value="0" min="0" />
+        <button id="runCameraBtn">拍照并检测</button>
+        <span class="divider"></span>
+        <input id="uploadInput" type="file" accept="image/*" />
+        <button id="runUploadBtn">导入图片检测</button>
+      </div>
+      <div id="status" class="status">待机中</div>
+      <div id="cost" class="cost">检测耗时：-</div>
+      <div id="alarmBox" class="alarm"></div>
+    </div>
+
+    <div class="grid">
+      <div class="panel">
+        <h2>输入图（拍照或导入）</h2>
+        <div class="imgbox">
+          <img id="captureImg" alt="input" />
+          <span id="capHint" class="hint">尚无输入图片</span>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>推理结果图（含检测框）</h2>
+        <div class="imgbox">
+          <img id="resultImg" alt="result" />
+          <span id="resHint" class="hint">尚无检测结果</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top: 14px;">
+      <h2>缺失明细</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>零件</th>
+            <th>缺失数量</th>
+            <th>缺失编号</th>
+          </tr>
+        </thead>
+        <tbody id="missingBody">
+          <tr><td colspan="3" class="hint">暂无数据</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="panel" style="margin-top: 14px;">
+      <h2>零件统计与OCR汇总</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>零件</th>
+            <th>应有数量</th>
+            <th>检测到</th>
+            <th>缺失</th>
+            <th>OCR内容</th>
+            <th>OCR编号</th>
+          </tr>
+        </thead>
+        <tbody id="partSummaryBody">
+          <tr><td colspan="6" class="hint">暂无数据</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="panel" style="margin-top: 14px;">
+      <h2>检测框OCR明细</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>零件</th>
+            <th>置信度</th>
+            <th>OCR内容</th>
+            <th>OCR编号</th>
+          </tr>
+        </thead>
+        <tbody id="detBody">
+          <tr><td colspan="5" class="hint">暂无数据</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const runCameraBtn = document.getElementById("runCameraBtn");
+    const runUploadBtn = document.getElementById("runUploadBtn");
+    const uploadInput = document.getElementById("uploadInput");
+    const cameraIndex = document.getElementById("cameraIndex");
+    const statusEl = document.getElementById("status");
+    const costEl = document.getElementById("cost");
+    const alarmBox = document.getElementById("alarmBox");
+    const capImg = document.getElementById("captureImg");
+    const resultImg = document.getElementById("resultImg");
+    const capHint = document.getElementById("capHint");
+    const resHint = document.getElementById("resHint");
+    const missingBody = document.getElementById("missingBody");
+    const partSummaryBody = document.getElementById("partSummaryBody");
+    const detBody = document.getElementById("detBody");
+
+    function setBusy(busy) {
+      runCameraBtn.disabled = busy;
+      runUploadBtn.disabled = busy;
+    }
+
+    function playWebAlarm() {
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "square";
+        osc.frequency.value = 1040;
+        gain.gain.value = 0.15;
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+        setTimeout(() => osc.stop(), 280);
+      } catch (e) {
+        console.log("audio failed", e);
+      }
+    }
+
+    function renderMissing(parts) {
+      if (!parts || parts.length === 0) {
+        missingBody.innerHTML = `<tr><td colspan="3" class="ok-txt">未发现缺失</td></tr>`;
+        return;
+      }
+      missingBody.innerHTML = parts.map(p => {
+        let codes = "-";
+        if (p.missing_codes && p.missing_codes.length > 0) {
+          codes = p.missing_codes.join(", ");
+        } else if (p.missing_code_hint) {
+          codes = p.missing_code_hint;
+        }
+        return `<tr>
+          <td>${p.class_name || "-"}</td>
+          <td class="warn-txt">${p.missing_count ?? 0}</td>
+          <td>${codes}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    function renderPartSummaries(rows) {
+      if (!rows || rows.length === 0) {
+        partSummaryBody.innerHTML = `<tr><td colspan="6" class="hint">暂无数据</td></tr>`;
+        return;
+      }
+      partSummaryBody.innerHTML = rows.map(r => {
+        const ocrTexts = (r.ocr_texts && r.ocr_texts.length > 0) ? r.ocr_texts.join(" | ") : "-";
+        const ocrCodes = (r.ocr_codes && r.ocr_codes.length > 0) ? r.ocr_codes.join(", ") : "-";
+        const missCls = (r.missing_count && r.missing_count > 0) ? "warn-txt" : "ok-txt";
+        return `<tr>
+          <td>${r.class_name || "-"}</td>
+          <td>${r.required_count ?? 0}</td>
+          <td>${r.found_count ?? 0}</td>
+          <td class="${missCls}">${r.missing_count ?? 0}</td>
+          <td>${ocrTexts}</td>
+          <td>${ocrCodes}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    function renderDetections(rows) {
+      if (!rows || rows.length === 0) {
+        detBody.innerHTML = `<tr><td colspan="5" class="hint">暂无数据</td></tr>`;
+        return;
+      }
+      detBody.innerHTML = rows.map((d, idx) => {
+        const conf = (typeof d.confidence === "number") ? d.confidence.toFixed(3) : "-";
+        const txt = (d.ocr_texts && d.ocr_texts.length > 0) ? d.ocr_texts.join(" | ") : "-";
+        const codes = (d.ocr_codes && d.ocr_codes.length > 0) ? d.ocr_codes.join(", ") : "-";
+        return `<tr>
+          <td>${idx + 1}</td>
+          <td>${d.class_name || "-"}</td>
+          <td>${conf}</td>
+          <td>${txt}</td>
+          <td>${codes}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    function renderResult(data) {
+      const ts = Date.now();
+      if (data.capture_image_url) {
+        capImg.src = `${data.capture_image_url}?t=${ts}`;
+        capImg.style.display = "block";
+        capHint.style.display = "none";
+      }
+      if (data.annotated_image_url) {
+        resultImg.src = `${data.annotated_image_url}?t=${ts}`;
+        resultImg.style.display = "block";
+        resHint.style.display = "none";
+      }
+      renderMissing(data.missing_parts || []);
+      renderPartSummaries(data.part_summaries || []);
+      renderDetections(data.detections || []);
+
+      const missingItems = data.missing_total_items || 0;
+      if (data.missing_status === "missing_detected") {
+        alarmBox.className = "alarm warn";
+        alarmBox.textContent = `报警：检测到工具缺失，缺失总数 ${missingItems} 个。`;
+        playWebAlarm();
+      } else {
+        alarmBox.className = "alarm ok";
+        alarmBox.textContent = "正常：未检测到缺失。";
+      }
+      statusEl.textContent = `完成：检测目标 ${data.detection_count ?? 0} 个，OCR状态：${data.ocr_status || "unknown"}`;
+      const costMs = data.processing_time_ms ?? 0;
+      const costSec = data.processing_time_sec ?? (costMs / 1000);
+      costEl.textContent = `检测耗时：${costMs} ms（${costSec} s）`;
+    }
+
+    async function runCameraWorkflow() {
+      setBusy(true);
+      statusEl.textContent = "正在拍照并检测...";
+      costEl.textContent = "检测耗时：计算中...";
+      alarmBox.className = "alarm";
+      alarmBox.textContent = "";
+      try {
+        const payload = { camera_index: Number(cameraIndex.value || 0) };
+        const res = await fetch("/api/capture-and-detect", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "请求失败");
+        renderResult(data);
+      } catch (e) {
+        statusEl.textContent = `失败：${e.message}`;
+        costEl.textContent = "检测耗时：-";
+        alarmBox.className = "alarm warn";
+        alarmBox.textContent = "报警：拍照检测执行失败。";
+        playWebAlarm();
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function runUploadWorkflow() {
+      const file = uploadInput.files && uploadInput.files[0];
+      if (!file) {
+        statusEl.textContent = "请先选择本地图片文件。";
+        return;
+      }
+      setBusy(true);
+      statusEl.textContent = "正在上传图片并检测...";
+      costEl.textContent = "检测耗时：计算中...";
+      alarmBox.className = "alarm";
+      alarmBox.textContent = "";
+      try {
+        const form = new FormData();
+        form.append("image", file);
+        const res = await fetch("/api/detect-upload", {
+          method: "POST",
+          body: form
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "上传检测失败");
+        renderResult(data);
+      } catch (e) {
+        statusEl.textContent = `失败：${e.message}`;
+        costEl.textContent = "检测耗时：-";
+        alarmBox.className = "alarm warn";
+        alarmBox.textContent = "报警：导图检测执行失败。";
+        playWebAlarm();
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    runCameraBtn.addEventListener("click", runCameraWorkflow);
+    runUploadBtn.addEventListener("click", runUploadWorkflow);
+  </script>
+</body>
+</html>

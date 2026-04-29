@@ -1,0 +1,95 @@
+{
+  "capture": {
+    "script": "test_hk_opecv.py",
+    "python_executable": "D:/1/new/EzYOLO-main/.venv/Scripts/python.exe",
+    "mode": "ultrafast",
+    "preview_mode": "ultrafast",
+    "script_timeout_sec": 15,
+    "count": 1,
+    "headless": true
+  },
+  "model": {
+    "path": "D:/1/new/EzYOLO-main/best_last.pt",
+    "conf_threshold": 0.5,
+    "class_conf_thresholds": {
+      "die": 0.5,
+      "tool": 0.6,
+      "pin": 0.5
+    }
+  },
+  "ocr": {
+    "enabled": true,
+    "allow_failure": true,
+    "lang": "en",
+    "score_threshold": 0.5
+  },
+  "input": {
+    "image_dir": ".",
+    "image_pattern": "capture_clear_*.jpg",
+    "default_limit_images": 5
+  },
+  "camera": {
+    "hik_only_mode": true,
+    "provider": "hik_sdk",
+    "live_provider": "hik_sdk",
+    "camera_index": 0,
+    "source": "",
+    "source_prefer": false,
+    "source_fallback_to_index": false,
+    "hik_auto_exposure": true,
+    "hik_auto_gain": true,
+    "hik_ae_profile": "day",
+    "hik_ae_target_brightness": 120,
+    "hik_ae_settle_frames": 0,
+    "hik_exposure_time": 10000.0,
+    "hik_gain": 7.0,
+    "hik_mvs_home": "C:/Program Files (x86)/Common Files/MVS",
+    "hik_dll_path": "C:/Program Files (x86)/Common Files/MVS/Runtime/Win64_x64/MvCameraControl.dll",
+    "hik_python_path": "D:/MVS/Development/Samples/Python/MvImport",
+    "width": 0,
+    "height": 0
+  },
+  "rules": {
+    "code_pattern": "TH\\d{2}",
+    "expected_tools": [
+      {
+        "class_name": "die",
+        "required_count": 5,
+        "required_codes": [
+          "TH12",
+          "TH16",
+          "TH20",
+          "TH25",
+          "TH26"
+        ]
+      },
+      {
+        "class_name": "tool",
+        "required_count": 1,
+        "required_codes": []
+      },
+            {
+        "class_name": "pin",
+        "required_count": 1,
+        "required_codes": []
+      }
+    ]
+  },
+  "output": {
+    "runtime_dir": "runtime"
+  },
+  "wenzi": {
+    "enabled": true,
+    "min_box_area": 350,
+    "max_die_boxes": 6,
+    "stable_mode": true,
+    "two_stage": true,
+    "two_stage_max_missing_items": 1,
+    "ocr_fallback_full": true,
+    "ocr_fast_max_side": 640,
+    "ocr_timeout_ms": 2500,
+    "max_ocr_items": 0,
+    "fast_imgsz": 512,
+    "full_imgsz": 960
+  }
+}
