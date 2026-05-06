@@ -121,6 +121,7 @@ class WorkflowService:
         self.report_dir = runtime_dir / "reports"
         self.preview_dir = runtime_dir / "preview"
         self.tmp_dir = runtime_dir / "tmp"
+        self.log_dir = runtime_dir / "logs"
         for d in [
             self.runtime_dir,
             self.capture_dir,
@@ -129,6 +130,7 @@ class WorkflowService:
             self.report_dir,
             self.preview_dir,
             self.tmp_dir,
+            self.log_dir,
         ]:
             d.mkdir(parents=True, exist_ok=True)
 
@@ -226,6 +228,11 @@ class WorkflowService:
         self._stream_last_error_ts = 0.0
         self._preview_worker_stop = threading.Event()
         self._preview_worker_thread = None
+        self._hik_live_process = None
+        self._hik_live_process_lock = threading.Lock()
+        self._hik_live_frame_path = self.preview_dir / "hik_live.jpg"
+        self._hik_live_stdout = self.log_dir / "hik-live.out.log"
+        self._hik_live_stderr = self.log_dir / "hik-live.err.log"
         self._cv_stream_lock = threading.Lock()
         self._cv_stream_cap = None
         self._cv_stream_key = None
@@ -816,6 +823,115 @@ class WorkflowService:
             self._preview_worker_stop.set()
         except Exception:
             pass
+        self.stop_hik_live_process()
+
+    def start_hik_live_process(self) -> None:
+        if self.camera_live_provider != "hik_sdk":
+            return
+        with self._hik_live_process_lock:
+            if self._hik_live_process is not None and self._hik_live_process.poll() is None:
+                return
+            script = PROJECT_ROOT / "hik_live_worker.py"
+            if not script.exists():
+                with self._stream_lock:
+                    self._stream_last_error = f"Missing Hik live worker: {script}"
+                    self._stream_last_error_ts = time.time()
+                return
+            cmd = [
+                str(self.capture_python),
+                str(script),
+                "--output",
+                str(self._hik_live_frame_path),
+                "--camera-index",
+                str(int(self.camera_index_default)),
+                "--fps",
+                str(max(1.0, min(float(self.preview_fps), 15.0))),
+                "--jpeg-quality",
+                "75",
+                "--ae-target-brightness",
+                str(int(self._get_hik_ae_target())),
+                "--ae-settle-frames",
+                str(max(0, int(self.hik_ae_settle_frames))),
+            ]
+            if self.hik_auto_exposure:
+                cmd.append("--auto-exposure")
+            else:
+                cmd.extend(["--manual-exposure", "--exposure", str(float(self.hik_exposure_time))])
+            if self.hik_auto_gain:
+                cmd.append("--auto-gain")
+            else:
+                cmd.extend(["--manual-gain", "--gain", str(float(self.hik_gain))])
+            env = os.environ.copy()
+            if self.hik_mvs_home:
+                env["MVS_HOME"] = self.hik_mvs_home
+            if self.hik_dll_path:
+                env["MVS_DLL_PATH"] = self.hik_dll_path
+                dll_dir = str(Path(self.hik_dll_path).resolve().parent)
+                env["PATH"] = dll_dir + os.pathsep + env.get("PATH", "")
+            py_parts = [str(PROJECT_ROOT)]
+            if self.hik_python_path:
+                py_parts.append(str(Path(self.hik_python_path).resolve()))
+            if env.get("PYTHONPATH"):
+                py_parts.append(env["PYTHONPATH"])
+            env["PYTHONPATH"] = os.pathsep.join(py_parts)
+            self._hik_live_stdout.parent.mkdir(parents=True, exist_ok=True)
+            out_f = open(self._hik_live_stdout, "ab")
+            err_f = open(self._hik_live_stderr, "ab")
+            try:
+                self._hik_live_process = subprocess.Popen(
+                    cmd,
+                    cwd=str(PROJECT_ROOT),
+                    stdout=out_f,
+                    stderr=err_f,
+                    env=env,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
+            except Exception as e:
+                with self._stream_lock:
+                    self._stream_last_error = f"Failed to start Hik live worker: {e}"
+                    self._stream_last_error_ts = time.time()
+                try:
+                    out_f.close()
+                    err_f.close()
+                except Exception:
+                    pass
+
+    def stop_hik_live_process(self) -> None:
+        with self._hik_live_process_lock:
+            proc = self._hik_live_process
+            self._hik_live_process = None
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except Exception:
+                    proc.kill()
+        except Exception:
+            pass
+
+    def _get_hik_live_file_frame(self, max_age_sec: float = 2.0) -> Optional[np.ndarray]:
+        path = self._hik_live_frame_path
+        if not path.exists():
+            return None
+        try:
+            age = time.time() - path.stat().st_mtime
+            if age > float(max_age_sec):
+                return None
+            img = cv2.imread(str(path))
+            if img is None or not self._is_usable_frame(img):
+                return None
+            with self._live_frame_lock:
+                self._latest_live_frame[int(self.camera_index_default)] = img.copy()
+                self._latest_live_frame_ts[int(self.camera_index_default)] = time.time()
+            return img
+        except Exception as e:
+            with self._stream_lock:
+                self._stream_last_error = f"Read Hik live frame failed: {e}"
+                self._stream_last_error_ts = time.time()
+            return None
 
     def _preview_worker_loop(self) -> None:
         idx = int(self.camera_index_default)
@@ -1785,16 +1901,19 @@ def create_app(config_path: Path) -> FastAPI:
     def live_stream(camera_index: Optional[int] = None):
         interval = 1.0 / max(service.preview_fps, 1.0)
         idx = int(service.camera_index_default if camera_index is None else camera_index)
-        service.start_preview_worker()
+        if service.camera_live_provider == "hik_sdk":
+            service.start_hik_live_process()
+        else:
+            service.start_preview_worker()
 
         def gen():
             fail_count = 0
             while True:
                 try:
                     if service.camera_live_provider == "hik_sdk":
-                        frame = service._get_cached_live_frame(idx, max_age_sec=2.0)
+                        frame = service._get_hik_live_file_frame(max_age_sec=2.0)
                         if frame is None:
-                            raise RuntimeError("live frame cache is not ready")
+                            raise RuntimeError("Hik live frame is not ready")
                     else:
                         frame = service._get_preview_frame(idx)
                     fail_count = 0
@@ -1811,7 +1930,9 @@ def create_app(config_path: Path) -> FastAPI:
                 except Exception:
                     fail_count += 1
                     # Keep stream alive: fallback to cached frame when realtime grab fails.
-                    cached = service._get_cached_live_frame(idx, max_age_sec=30.0)
+                    cached = service._get_hik_live_file_frame(max_age_sec=30.0)
+                    if cached is None:
+                        cached = service._get_cached_live_frame(idx, max_age_sec=30.0)
                     if cached is not None:
                         ok, encoded = cv2.imencode(".jpg", cached, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
                         if ok:
@@ -1839,6 +1960,12 @@ def create_app(config_path: Path) -> FastAPI:
         with service._stream_lock:
             last_error = service._stream_last_error
             last_error_ts = service._stream_last_error_ts
+        worker_alive = False
+        with service._hik_live_process_lock:
+            worker_alive = bool(service._hik_live_process is not None and service._hik_live_process.poll() is None)
+        live_file_age_ms = None
+        if service._hik_live_frame_path.exists():
+            live_file_age_ms = int((time.time() - service._hik_live_frame_path.stat().st_mtime) * 1000)
         age_ms = None
         if ts:
             age_ms = int((time.time() - ts) * 1000)
@@ -1847,6 +1974,9 @@ def create_app(config_path: Path) -> FastAPI:
             "live_provider": service.camera_live_provider,
             "camera_index": idx,
             "stream_ready": service._hik_stream_ready(idx),
+            "hik_live_worker_alive": worker_alive,
+            "hik_live_file": str(service._hik_live_frame_path),
+            "hik_live_file_age_ms": live_file_age_ms,
             "cached_frame": bool(service._get_cached_live_frame(idx, max_age_sec=2.0) is not None),
             "cached_age_ms": age_ms,
             "last_error": last_error,
