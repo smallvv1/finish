@@ -54,11 +54,17 @@ class RapidDigitOCR:
                 result, _elapse = self.ocr(candidate)
             except Exception:
                 continue
+            candidate_texts: List[str] = []
+            candidate_numbers: List[str] = []
             for text, _conf in _iter_rapidocr_texts(result):
                 if text:
-                    texts.append(text)
-                    numbers.extend(re.findall(r"\d+", text))
-            if numbers:
+                    candidate_texts.append(text)
+                    candidate_numbers.extend(re.findall(r"\d+", text))
+            texts.extend(candidate_texts)
+            numbers.extend(candidate_numbers)
+            has_code_like_text = any(re.search(r"[A-Z]{1,3}\s*\d{2}", t, re.IGNORECASE) for t in candidate_texts)
+            has_two_digit_number = any(len(re.sub(r"\D", "", n)) >= 2 for n in candidate_numbers)
+            if has_code_like_text or has_two_digit_number:
                 break
 
         elapsed = time.perf_counter() - start
@@ -70,13 +76,18 @@ class RapidDigitOCR:
         if image is None or getattr(image, "size", 0) == 0:
             return []
 
-        base = _resize_keep_aspect(image, max_side=480)
+        base = _scale_keep_aspect(image, target_long_side=900)
         variants: List[np.ndarray] = []
         h, w = base.shape[:2]
         if h >= 16 and w >= 16:
             rois = [
-                base[int(h * 0.48): min(h, int(h * 0.96)), :],
-                base[int(h * 0.40): min(h, int(h * 0.90)), max(0, int(w * 0.08)): min(w, int(w * 0.92))],
+                # The top-right slots (TH25/TH26) often have small, slanted text.
+                # Try raw high-resolution lower/top-ring regions before enhanced
+                # full crops; downscaling those crops makes RapidOCR miss them.
+                base[int(h * 0.50): min(h, int(h * 0.96)), 0:min(w, int(w * 0.82))],
+                base[int(h * 0.55): h, 0:min(w, int(w * 0.76))],
+                base[0:min(h, int(h * 0.50)), max(0, int(w * 0.35)):w],
+                base[int(h * 0.18):min(h, int(h * 0.92)), max(0, int(w * 0.12)):min(w, int(w * 0.90))],
                 base,
             ]
         else:
@@ -85,10 +96,12 @@ class RapidDigitOCR:
         for roi in rois:
             if roi is None or getattr(roi, "size", 0) == 0:
                 continue
+            variants.append(roi)
+            variants.append(cv2.rotate(roi, cv2.ROTATE_180))
+            variants.append(cv2.rotate(roi, cv2.ROTATE_90_CLOCKWISE))
+            variants.append(cv2.rotate(roi, cv2.ROTATE_90_COUNTERCLOCKWISE))
             norm = _enhance_for_ocr(roi)
             variants.append(norm)
-        if variants:
-            variants.append(cv2.rotate(variants[0], cv2.ROTATE_180))
 
         return variants
 
@@ -349,6 +362,19 @@ def _resize_keep_aspect(img: np.ndarray, max_side: int) -> np.ndarray:
         img,
         (max(1, int(w * scale)), max(1, int(h * scale))),
         interpolation=cv2.INTER_CUBIC,
+    )
+
+
+def _scale_keep_aspect(img: np.ndarray, target_long_side: int) -> np.ndarray:
+    h, w = img.shape[:2]
+    longest = max(h, w)
+    if longest <= 0 or longest == target_long_side:
+        return img
+    scale = target_long_side / float(longest)
+    return cv2.resize(
+        img,
+        (max(1, int(w * scale)), max(1, int(h * scale))),
+        interpolation=cv2.INTER_CUBIC if scale > 1.0 else cv2.INTER_AREA,
     )
 
 
