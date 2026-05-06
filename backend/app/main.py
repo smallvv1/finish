@@ -149,10 +149,11 @@ class WorkflowService:
         if self.camera_live_provider == "hik_script":
             self.camera_live_provider = "hik_sdk"
         if self.hik_only_mode:
-            # Force realtime-capable Hik SDK path in hik-only mode.
+            # Keep capture/detect on Hik, but allow preview to use OpenCV when
+            # the Hik streaming SDK is unstable.
             if self.camera_provider not in {"hik_script", "hik_sdk"}:
                 self.camera_provider = "hik_sdk"
-            if self.camera_live_provider not in {"hik_script", "hik_sdk"}:
+            if self.camera_live_provider in {"hik_script", ""}:
                 self.camera_live_provider = "hik_sdk"
         self.camera_source = str(self.cfg.get("camera", {}).get("source", "")).strip()
         self.camera_source_prefer = bool(self.cfg.get("camera", {}).get("source_prefer", True))
@@ -223,6 +224,8 @@ class WorkflowService:
         self._stream_opening = False
         self._stream_last_error = ""
         self._stream_last_error_ts = 0.0
+        self._preview_worker_stop = threading.Event()
+        self._preview_worker_thread = None
         self._cv_stream_lock = threading.Lock()
         self._cv_stream_cap = None
         self._cv_stream_key = None
@@ -799,6 +802,38 @@ class WorkflowService:
         t = threading.Thread(target=self.warmup_camera_stream, args=(device_index,), daemon=True)
         t.start()
 
+    def start_preview_worker(self) -> None:
+        if self.camera_live_provider != "hik_sdk":
+            return
+        if self._preview_worker_thread is not None and self._preview_worker_thread.is_alive():
+            return
+        self._preview_worker_stop.clear()
+        self._preview_worker_thread = threading.Thread(target=self._preview_worker_loop, daemon=True)
+        self._preview_worker_thread.start()
+
+    def stop_preview_worker(self) -> None:
+        try:
+            self._preview_worker_stop.set()
+        except Exception:
+            pass
+
+    def _preview_worker_loop(self) -> None:
+        idx = int(self.camera_index_default)
+        while not self._preview_worker_stop.is_set():
+            try:
+                if not self._hik_stream_ready(idx):
+                    self.warmup_camera_stream(idx)
+                if self._hik_stream_ready(idx):
+                    frame = self._capture_hik_stream_frame(idx)
+                    self._cache_live_frame(idx, frame)
+                    time.sleep(0.05)
+                    continue
+            except Exception as e:
+                with self._stream_lock:
+                    self._stream_last_error = str(e)
+                    self._stream_last_error_ts = time.time()
+            time.sleep(0.5)
+
     def _hik_stream_ready(self, device_index: int) -> bool:
         with self._stream_lock:
             return (
@@ -1168,10 +1203,6 @@ class WorkflowService:
                 raise RuntimeError(f"Hik realtime stream open failed: {last_error}")
             raise RuntimeError("Hik realtime stream is initializing")
         if str(self.camera_live_provider).lower() not in {"hik_script", "hik_sdk"}:
-            if self.hik_only_mode:
-                raise RuntimeError(
-                    f"live_provider={self.camera_live_provider} is disabled in hik_only_mode"
-                )
             return self._capture_cv_stream_frame(camera_index, self.camera_live_provider)
         try:
             return self._get_live_frame_by_provider(camera_index, self.camera_live_provider)
@@ -1510,6 +1541,7 @@ def create_app(config_path: Path) -> FastAPI:
         try:
             yield
         finally:
+            service.stop_preview_worker()
             try:
                 service._close_hik_stream()
             except Exception:
@@ -1748,13 +1780,19 @@ def create_app(config_path: Path) -> FastAPI:
     @app.get("/api/live-stream")
     def live_stream(camera_index: Optional[int] = None):
         interval = 1.0 / max(service.preview_fps, 1.0)
+        idx = int(service.camera_index_default if camera_index is None else camera_index)
+        service.start_preview_worker()
 
         def gen():
             fail_count = 0
             while True:
                 try:
-                    frame = service._get_preview_frame(camera_index)
-                    service._cache_live_frame(camera_index, frame)
+                    if service.camera_live_provider == "hik_sdk":
+                        frame = service._get_cached_live_frame(idx, max_age_sec=2.0)
+                        if frame is None:
+                            raise RuntimeError("live frame cache is not ready")
+                    else:
+                        frame = service._get_preview_frame(idx)
                     fail_count = 0
                     ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
                     if not ok:
@@ -1769,7 +1807,7 @@ def create_app(config_path: Path) -> FastAPI:
                 except Exception:
                     fail_count += 1
                     # Keep stream alive: fallback to cached frame when realtime grab fails.
-                    cached = service._get_cached_live_frame(camera_index, max_age_sec=30.0)
+                    cached = service._get_cached_live_frame(idx, max_age_sec=30.0)
                     if cached is not None:
                         ok, encoded = cv2.imencode(".jpg", cached, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
                         if ok:
@@ -1788,6 +1826,30 @@ def create_app(config_path: Path) -> FastAPI:
                 time.sleep(interval)
 
         return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+    @app.get("/api/live-status")
+    def live_status(camera_index: Optional[int] = None):
+        idx = int(service.camera_index_default if camera_index is None else camera_index)
+        with service._live_frame_lock:
+            ts = service._latest_live_frame_ts.get(idx)
+        with service._stream_lock:
+            last_error = service._stream_last_error
+            last_error_ts = service._stream_last_error_ts
+        age_ms = None
+        if ts:
+            age_ms = int((time.time() - ts) * 1000)
+        return {
+            "provider": service.camera_provider,
+            "live_provider": service.camera_live_provider,
+            "camera_index": idx,
+            "stream_ready": service._hik_stream_ready(idx),
+            "cached_frame": bool(service._get_cached_live_frame(idx, max_age_sec=2.0) is not None),
+            "cached_age_ms": age_ms,
+            "last_error": last_error,
+            "last_error_time": dt.datetime.fromtimestamp(last_error_ts).isoformat(timespec="seconds")
+            if last_error_ts
+            else None,
+        }
 
     @app.get("/api/health")
     async def health():
