@@ -34,7 +34,6 @@ from workflow import (
     load_config,
     _resolve_path,
 )
-from wenzi import detect_and_ocr_with_wenzi
 
 # Speed up Paddle initialization in offline environments.
 os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
@@ -44,9 +43,8 @@ try:
 except ImportError:
     winsound = None
 
-from paddleocr import PaddleOCR
 from ultralytics import YOLO
-from mnist_digit_ocr import MnistDigitOCR
+from det import RapidDigitOCR, detect_and_ocr_with_det
 
 try:
     from MvCameraControl_class import *  # noqa: F403
@@ -358,16 +356,8 @@ class WorkflowService:
                 return
 
             try:
-                self.ocr_engine = MnistDigitOCR(use_paddle_fallback=True, prefer_paddle=True)
-                ref_path = self._find_die_reference_image()
-                ready = False
-                if ref_path is not None and self.model is not None:
-                    ready = self.ocr_engine.bootstrap_from_reference(
-                        reference_image_path=ref_path,
-                        model=self.model,
-                        conf_threshold=self.conf_threshold,
-                    )
-                self.ocr_status = "fast_plate_ocr_slot_ready" if ready else "fast_plate_ocr_slot_no_reference"
+                self.ocr_engine = RapidDigitOCR(text_score=self.ocr_score_thresh)
+                self.ocr_status = "rapidocr_ready"
             except Exception as e:
                 self.ocr_engine = None
                 self.ocr_status = f"failed: {e}"
@@ -929,31 +919,87 @@ class WorkflowService:
         idx = self.camera_index_default if camera_index is None else int(camera_index)
 
         # Always prefer latest cached preview frame to minimize click-to-result latency.
-        cached = self._get_cached_live_frame(idx, max_age_sec=10.0)
-        if cached is None:
+        cached = self._get_cached_live_frame(idx, max_age_sec=300.0)
+        if cached is not None and self._is_usable_frame(cached):
+            filename = f"{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+            path = self.capture_dir / filename
+            cv2.imwrite(str(path), cached)
+            return path
+
+        # The realtime Hik SDK path can block for a long time when the device is busy.
+        # For explicit capture, use the bounded script path so requests fail by timeout
+        # instead of occupying the detection lock indefinitely.
+        if str(self.camera_provider).strip().lower() == "hik_sdk":
+            fallback = self._copy_latest_saved_image_to_capture_dir(max_age_sec=300.0)
+            if fallback is not None:
+                return fallback
             try:
-                cached = self._get_preview_frame(idx)
+                return self._capture_by_hik_script(self.capture_mode)
+            except Exception as e:
+                fallback = self._copy_latest_saved_image_to_capture_dir()
+                if fallback is not None:
+                    return fallback
+                raise RuntimeError(str(e))
+
+        try:
+            cached = self._get_live_frame_by_provider(idx, self.camera_provider)
+            if self._is_usable_frame(cached):
                 self._cache_live_frame(idx, cached)
-            except Exception:
-                try:
-                    cached = self._get_live_frame(idx)
-                    self._cache_live_frame(idx, cached)
-                except Exception:
-                    raise RuntimeError(
-                        f"No recent live frame for camera_index={idx}, and on-demand capture failed. "
-                        "Please check camera connection and retry."
-                    )
+            else:
+                cached = None
+        except Exception as e:
+            raise RuntimeError(
+                f"No recent live frame for camera_index={idx}, and on-demand capture failed: {e}"
+            )
+        if cached is None:
+            fallback = self._copy_latest_saved_image_to_capture_dir()
+            if fallback is not None:
+                return fallback
+            raise RuntimeError(f"No usable frame for camera_index={idx}")
 
         filename = f"{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
         path = self.capture_dir / filename
         cv2.imwrite(str(path), cached)
         return path
 
+    def _copy_latest_saved_image_to_capture_dir(self, max_age_sec: Optional[float] = None) -> Optional[Path]:
+        candidates: List[Path] = []
+        for base in [self.preview_dir, self.capture_dir, self.upload_dir]:
+            if not base.exists():
+                continue
+            for pattern in ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp"):
+                candidates.extend([p for p in base.glob(pattern) if p.is_file()])
+        if not candidates:
+            return None
+        now = time.time()
+        for latest in sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True):
+            if max_age_sec is not None and (now - latest.stat().st_mtime) > float(max_age_sec):
+                continue
+            img = cv2.imread(str(latest))
+            if img is None or not self._is_usable_frame(img):
+                continue
+            out = self.capture_dir / f"{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}{latest.suffix.lower()}"
+            ok = cv2.imwrite(str(out), img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+            return out if ok else None
+        return None
+
     def _cache_live_frame(self, camera_index: Optional[int], frame: np.ndarray) -> None:
+        if not self._is_usable_frame(frame):
+            return
         idx = self.camera_index_default if camera_index is None else int(camera_index)
         with self._live_frame_lock:
             self._latest_live_frame[idx] = frame.copy()
             self._latest_live_frame_ts[idx] = time.time()
+
+    def _is_usable_frame(self, frame: Optional[np.ndarray]) -> bool:
+        if frame is None or getattr(frame, "size", 0) == 0:
+            return False
+        try:
+            mean = float(frame.mean())
+            max_value = int(frame.max())
+        except Exception:
+            return False
+        return mean >= 8.0 and max_value >= 40
 
     def _get_cached_live_frame(self, camera_index: Optional[int], max_age_sec: float) -> Optional[np.ndarray]:
         idx = self.camera_index_default if camera_index is None else int(camera_index)
@@ -1109,50 +1155,17 @@ class WorkflowService:
         # Realtime preview can use a different provider than capture/detect.
         idx = self.camera_index_default if camera_index is None else int(camera_index)
         if self.camera_live_provider == "hik_sdk":
-            # Do not block the first HTTP response on SDK open/enum.
+            # Do not block preview HTTP responses on SDK open/enum or script fallback.
             if self._hik_stream_ready(idx):
                 return self._capture_hik_stream_frame(idx)
             cached = self._get_cached_live_frame(idx, max_age_sec=2.0)
             if cached is not None:
                 return cached
             self._ensure_hik_stream_async(idx)
-            if not self._stream_opening:
-                with self._stream_lock:
-                    last_error = (self._stream_last_error or "").strip()
-                if last_error:
-                    # Fallback to script frame when SDK stream cannot be opened.
-                    try:
-                        src = self._capture_by_hik_script(self.capture_preview_mode or self.capture_mode)
-                        img = cv2.imread(str(src))
-                        try:
-                            src.unlink(missing_ok=True)
-                        except Exception:
-                            pass
-                        if img is not None:
-                            return img
-                    except Exception:
-                        pass
-                    raise RuntimeError(f"Hik realtime stream open failed: {last_error}")
-            # Fallback immediately so UI still shows image while SDK stream initializes.
-            if self.camera_provider != "hik_sdk":
-                # For script fallback, reuse recent frame to avoid reopening camera every stream tick.
-                cached = self._get_cached_live_frame(idx, max_age_sec=1.0)
-                if cached is not None:
-                    return cached
-                # Fallback to Hik script only (still Hik camera, never host webcam).
-                return self._get_live_frame_by_provider(camera_index, self.camera_provider)
-            # Even when provider is hik_sdk, allow script fallback to avoid blank input panel.
-            try:
-                src = self._capture_by_hik_script(self.capture_preview_mode or self.capture_mode)
-                img = cv2.imread(str(src))
-                try:
-                    src.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                if img is not None:
-                    return img
-            except Exception:
-                pass
+            with self._stream_lock:
+                last_error = (self._stream_last_error or "").strip()
+            if last_error and not self._stream_opening:
+                raise RuntimeError(f"Hik realtime stream open failed: {last_error}")
             raise RuntimeError("Hik realtime stream is initializing")
         if str(self.camera_live_provider).lower() not in {"hik_script", "hik_sdk"}:
             if self.hik_only_mode:
@@ -1206,7 +1219,7 @@ class WorkflowService:
 
         with self._analyze_lock:
             if self.use_wenzi_pipeline:
-                image_reports = detect_and_ocr_with_wenzi(
+                image_reports = detect_and_ocr_with_det(
                     image_paths=[image_path],
                     model=self.model,
                     ocr_engine=ocr_engine,
@@ -1231,7 +1244,7 @@ class WorkflowService:
                     and self.wenzi_two_stage
                     and 0 < missing_items <= self.wenzi_two_stage_max_missing_items
                 ):
-                    image_reports = detect_and_ocr_with_wenzi(
+                    image_reports = detect_and_ocr_with_det(
                         image_paths=[image_path],
                         model=self.model,
                         ocr_engine=ocr_engine,
@@ -1363,15 +1376,6 @@ class WorkflowService:
         ]
 
         ocr_status = "skipped_fast_stage" if skip_ocr else self.ocr_status
-        if (
-            not skip_ocr
-            and self.ocr_engine is not None
-            and getattr(self.ocr_engine, "prefer_paddle", False)
-            and getattr(self.ocr_engine, "rec_engine", None) is None
-        ):
-            paddle_error = str(getattr(self.ocr_engine, "paddle_error", "") or "").strip()
-            if paddle_error:
-                ocr_status = f"fast_plate_ocr_pending_or_failed: {paddle_error}"
 
         return {
             "timestamp": dt.datetime.now().isoformat(timespec="seconds"),
@@ -1440,6 +1444,7 @@ def create_app(config_path: Path) -> FastAPI:
     service = WorkflowService(config_path)
     async_jobs: Dict[str, Dict[str, Any]] = {}
     async_jobs_lock = threading.Lock()
+    detection_route_lock = threading.Lock()
 
     def _cleanup_async_jobs(max_age_sec: float = 900.0) -> None:
         now = time.time()
@@ -1455,9 +1460,27 @@ def create_app(config_path: Path) -> FastAPI:
     def _finalize_result_urls(result: Dict[str, Any], elapsed_ms: int) -> Dict[str, Any]:
         result["capture_image_url"] = path_to_url(result.get("capture_image_path"))
         result["annotated_image_url"] = path_to_url(result.get("annotated_image_path"))
+        for det in result.get("detections", []) or []:
+            det["ocr_crop_url"] = path_to_url(det.get("ocr_crop_path"))
+        for slot in result.get("slot_results", []) or []:
+            det = slot.get("detection")
+            if isinstance(det, dict):
+                det["ocr_crop_url"] = path_to_url(det.get("ocr_crop_path"))
         result["processing_time_ms"] = int(elapsed_ms)
         result["processing_time_sec"] = round(float(elapsed_ms) / 1000.0, 3)
         return result
+
+    def _latest_nonblocking_image() -> Optional[Path]:
+        candidates: List[Path] = []
+        for base in [service.preview_dir, service.capture_dir, service.upload_dir]:
+            try:
+                for pattern in ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp"):
+                    candidates.extend([p for p in base.glob(pattern) if p.is_file()])
+            except Exception:
+                continue
+        if not candidates:
+            return None
+        return max(candidates, key=lambda p: p.stat().st_mtime)
 
     def _start_async_full_ocr(task_id: str, image_path: Path) -> None:
         def _worker() -> None:
@@ -1481,18 +1504,9 @@ def create_app(config_path: Path) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        # Warm up camera stream asynchronously to reduce first-open latency.
-        try:
-            t = threading.Thread(target=service.warmup_camera_stream, daemon=True)
-            t.start()
-        except Exception:
-            pass
-        # Warm up model/OCR asynchronously to reduce first-detection latency.
-        try:
-            t2 = threading.Thread(target=service.warmup_runtime, daemon=True)
-            t2.start()
-        except Exception:
-            pass
+        # Avoid startup warmups here: camera SDK/OCR initialization can block the
+        # single web process and make even /api/health wait until frontend timeout.
+        # Model and det.py OCR are initialized lazily by the detection request.
         try:
             yield
         finally:
@@ -1550,6 +1564,8 @@ def create_app(config_path: Path) -> FastAPI:
 
     @app.post("/api/capture-and-detect")
     def capture_and_detect(req: CaptureRequest):
+        if not detection_route_lock.acquire(blocking=False):
+            raise HTTPException(status_code=429, detail="Detection is already running. Please retry shortly.")
         t0 = time.perf_counter()
         try:
             t_capture0 = time.perf_counter()
@@ -1559,6 +1575,8 @@ def create_app(config_path: Path) -> FastAPI:
             t_analyze1 = time.perf_counter()
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+        finally:
+            detection_route_lock.release()
 
         if result["missing_status"] == "missing_detected":
             trigger_alarm()
@@ -1577,6 +1595,8 @@ def create_app(config_path: Path) -> FastAPI:
 
     @app.post("/api/capture-and-detect-fast")
     def capture_and_detect_fast(req: CaptureRequest):
+        if not detection_route_lock.acquire(blocking=False):
+            raise HTTPException(status_code=429, detail="Detection is already running. Please retry shortly.")
         _cleanup_async_jobs()
         t0 = time.perf_counter()
         try:
@@ -1588,6 +1608,8 @@ def create_app(config_path: Path) -> FastAPI:
             t_analyze1 = time.perf_counter()
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+        finally:
+            detection_route_lock.release()
 
         result["capture_image_url"] = path_to_url(result["capture_image_path"])
         result["annotated_image_url"] = path_to_url(result.get("annotated_image_path"))
@@ -1601,21 +1623,13 @@ def create_app(config_path: Path) -> FastAPI:
         }
         result["result_stage"] = "fast"
 
-        task_id = uuid.uuid4().hex
-        with async_jobs_lock:
-            async_jobs[task_id] = {
-                "status": "pending",
-                "created_ts": time.time(),
-                "updated_ts": time.time(),
-                "result": None,
-                "error": "",
-            }
-        _start_async_full_ocr(task_id, Path(result["capture_image_path"]))
-        result["async_task_id"] = task_id
+        result["async_task_id"] = ""
         return result
 
     @app.post("/api/detect-upload")
     def detect_upload(image: UploadFile = File(...)):
+        if not detection_route_lock.acquire(blocking=False):
+            raise HTTPException(status_code=429, detail="Detection is already running. Please retry shortly.")
         t0 = time.perf_counter()
         try:
             t_save0 = time.perf_counter()
@@ -1625,6 +1639,8 @@ def create_app(config_path: Path) -> FastAPI:
             t_analyze1 = time.perf_counter()
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+        finally:
+            detection_route_lock.release()
 
         if result["missing_status"] == "missing_detected":
             trigger_alarm()
@@ -1643,6 +1659,8 @@ def create_app(config_path: Path) -> FastAPI:
 
     @app.post("/api/detect-upload-fast")
     def detect_upload_fast(image: UploadFile = File(...)):
+        if not detection_route_lock.acquire(blocking=False):
+            raise HTTPException(status_code=429, detail="Detection is already running. Please retry shortly.")
         _cleanup_async_jobs()
         t0 = time.perf_counter()
         try:
@@ -1654,6 +1672,8 @@ def create_app(config_path: Path) -> FastAPI:
             t_analyze1 = time.perf_counter()
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+        finally:
+            detection_route_lock.release()
 
         result["capture_image_url"] = path_to_url(result["capture_image_path"])
         result["annotated_image_url"] = path_to_url(result.get("annotated_image_path"))
@@ -1667,17 +1687,7 @@ def create_app(config_path: Path) -> FastAPI:
         }
         result["result_stage"] = "fast"
 
-        task_id = uuid.uuid4().hex
-        with async_jobs_lock:
-            async_jobs[task_id] = {
-                "status": "pending",
-                "created_ts": time.time(),
-                "updated_ts": time.time(),
-                "result": None,
-                "error": "",
-            }
-        _start_async_full_ocr(task_id, Path(result["capture_image_path"]))
-        result["async_task_id"] = task_id
+        result["async_task_id"] = ""
         return result
 
     @app.get("/api/async-result/{task_id}")
@@ -1710,15 +1720,16 @@ def create_app(config_path: Path) -> FastAPI:
                 if cached is not None:
                     img = cached
                 else:
-                    # Hard fallback: grab one fresh frame via capture path so
-                    # frontend can still render input image when stream path is unstable.
-                    try:
-                        cap_path = service.capture_image(req.camera_index)
-                        img = cv2.imread(str(cap_path))
-                    except Exception:
-                        img = None
-                    if img is None:
-                        raise HTTPException(status_code=503, detail=f"live preview unavailable: {e}")
+                    latest = _latest_nonblocking_image()
+                    if latest is not None:
+                        return {
+                            "timestamp": dt.datetime.now().isoformat(timespec="seconds"),
+                            "capture_image_path": str(latest),
+                            "capture_image_url": path_to_url(str(latest)),
+                            "stale": True,
+                            "preview_status": f"live unavailable: {e}",
+                        }
+                    raise HTTPException(status_code=503, detail=f"live preview unavailable: {e}")
             ok = cv2.imwrite(str(out), img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
             if not ok:
                 raise RuntimeError("Preview write failed")
@@ -1779,7 +1790,7 @@ def create_app(config_path: Path) -> FastAPI:
         return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 
     @app.get("/api/health")
-    def health():
+    async def health():
         return {"status": "ok", "time": dt.datetime.now().isoformat(timespec="seconds")}
 
     @app.get("/api/camera-mode")

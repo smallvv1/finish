@@ -446,18 +446,25 @@ def detect_and_ocr_with_wenzi(
         candidates = die_candidates + other_candidates
 
         to0 = cv2.getTickCount()
+        crop_dir = annotated_dir.parent / "ocr_crops" / image_path.stem
+        die_crop_paths: Dict[Tuple[int, int, int, int], str] = {}
         fast_die_results: Dict[Tuple[int, int, int, int], Dict] = {}
         if ocr_engine is not None and hasattr(ocr_engine, "recognize_die_code"):
             staged = []
-            for _area, class_id, class_name, conf, x1, y1, x2, y2 in candidates:
+            for die_pos, (_area, class_id, class_name, conf, x1, y1, x2, y2) in enumerate(candidates, start=1):
                 if class_name.lower() != "die":
                     continue
                 px1, py1, px2, py2 = _pad_bbox(x1, y1, x2, y2, img.shape[1], img.shape[0], pad_ratio=0.24)
                 crop = img[py1:py2, px1:px2]
+                crop_dir.mkdir(parents=True, exist_ok=True)
+                crop_path = crop_dir / f"die_{die_pos:02d}_{x1}_{y1}_{x2}_{y2}_ocr.jpg"
+                cv2.imwrite(str(crop_path), crop, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+                die_crop_paths[(x1, y1, x2, y2)] = str(crop_path)
                 fast_result = ocr_engine.recognize_die_code(crop, expected_codes=expected_die_codes)
                 staged.append(
                     {
                         "key": (x1, y1, x2, y2),
+                        "ocr_crop_path": str(crop_path),
                         "ocr_texts": list(fast_result.get("texts", []) or []),
                         "ocr_codes": list(fast_result.get("codes", []) or []),
                         "code_scores": dict(fast_result.get("code_scores", {}) or {}),
@@ -508,6 +515,7 @@ def detect_and_ocr_with_wenzi(
                             "recognized_code": recognized_code,
                             "slot_index": fast_result.get("slot_index"),
                             "slot_match": bool(fast_result.get("slot_match", False)),
+                            "ocr_crop_path": fast_result.get("ocr_crop_path") or die_crop_paths.get((x1, y1, x2, y2), ""),
                         }
                     )
                     continue
@@ -542,6 +550,10 @@ def detect_and_ocr_with_wenzi(
                 die_budget_s = max(0.45, die_budget_s)
                 px1, py1, px2, py2 = _pad_bbox(x1, y1, x2, y2, img_w, img_h, pad_ratio=0.24)
                 crop = img[py1:py2, px1:px2]
+                crop_dir.mkdir(parents=True, exist_ok=True)
+                crop_path = crop_dir / f"die_{die_ocr_count + 1:02d}_{x1}_{y1}_{x2}_{y2}_ocr.jpg"
+                cv2.imwrite(str(crop_path), crop, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+                die_crop_paths[(x1, y1, x2, y2)] = str(crop_path)
                 fast_budget = min(0.55, max(0.14, die_budget_s * 0.45))
                 ocr_texts = []
                 for sub_crop in _build_die_subcrops(crop):
@@ -633,6 +645,7 @@ def detect_and_ocr_with_wenzi(
                     "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
                     "ocr_texts": ocr_texts,
                     "ocr_codes": ocr_codes,
+                    "ocr_crop_path": die_crop_paths.get((x1, y1, x2, y2), ""),
                 }
             )
 

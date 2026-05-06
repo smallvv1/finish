@@ -190,11 +190,12 @@
               <th>Recognized</th>
               <th>Status</th>
               <th>Confidence</th>
+              <th>OCR Crop</th>
             </tr>
           </thead>
           <tbody>
             <tr v-if="slotResults.length === 0">
-              <td colspan="6" class="t-muted">暂无数据</td>
+              <td colspan="7" class="t-muted">暂无数据</td>
             </tr>
             <tr
               v-for="(slot, idx) in slotResults"
@@ -213,6 +214,15 @@
                     ? slot.detection.confidence.toFixed(3)
                     : "-"
                 }}
+              </td>
+              <td>
+                <img
+                  v-if="slotOcrCropUrl(slot)"
+                  class="ocr-crop"
+                  :src="slotOcrCropUrl(slot)"
+                  alt="OCR crop"
+                />
+                <span v-else>-</span>
               </td>
             </tr>
           </tbody>
@@ -261,8 +271,8 @@ const previewInFlight = ref(false);
 const streamBroken = ref(false);
 const pendingAsyncTaskId = ref("");
 const apiBase = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/+$/, "");
-const CAMERA_DETECT_TIMEOUT_MS = 180000;
-const UPLOAD_DETECT_TIMEOUT_MS = 180000;
+const CAMERA_DETECT_TIMEOUT_MS = 60000;
+const UPLOAD_DETECT_TIMEOUT_MS = 60000;
 const FORCE_PREVIEW_POLLING = true;
 const PREVIEW_POLL_INTERVAL_MS = 1500;
 const hasAnyMissing = computed(
@@ -349,6 +359,11 @@ function slotStatusClass(slot) {
   return slot?.found && slot.slot_match ? "t-ok" : "t-warn";
 }
 
+function slotOcrCropUrl(slot) {
+  const url = slot?.detection?.ocr_crop_url;
+  return url ? withTs(apiUrl(url)) : "";
+}
+
 function applyResult(data) {
   captureImageUrl.value = data.capture_image_url
     ? withTs(apiUrl(data.capture_image_url))
@@ -375,7 +390,10 @@ function applyResult(data) {
     typeof t.detect === "number" ? `${Math.round(t.detect)} ms` : "-";
   ocrCost.value = typeof t.ocr === "number" ? `${Math.round(t.ocr)} ms` : "-";
 
-  if (data.missing_status === "missing_detected") {
+  if (ocrStatusText.value === "skipped_fast_stage") {
+    alarmWarn.value = false;
+    alarmText.value = "快速检测完成，当前仅显示检测框。";
+  } else if (data.missing_status === "missing_detected") {
     alarmWarn.value = true;
     alarmText.value = `检测到缺失：数量 ${missingTotalItems.value} 个，编号 ${missingTotalCodes.value} 个，请立即复核。`;
     playWebAlarm();
@@ -585,15 +603,8 @@ async function runCamera() {
   busy.value = true;
   resetAlarm();
   stopPreviewTimer();
-  if (useSnapshotPreview.value) {
-    stopStreamRetryTimer();
-  } else {
-    // Keep realtime stream auto-reconnect active during detection.
-    if (!liveStreamUrl.value || streamBroken.value) {
-      resetLiveStream();
-    }
-    startStreamRetryTimer();
-  }
+  stopStreamRetryTimer();
+  stopLiveStream();
   if (useSnapshotPreview.value) {
     for (let i = 0; i < 20 && previewInFlight.value; i += 1) {
       // Wait briefly for an inflight preview capture to finish to avoid camera contention.
@@ -639,7 +650,11 @@ async function runCamera() {
     );
     if (!res.ok) throw new Error(data.detail || "摄像头检测失败");
     applyResult(data);
-    stopAsyncResultTimer();
+    if (data.async_task_id) {
+      startAsyncResultPolling(data.async_task_id);
+    } else {
+      stopAsyncResultTimer();
+    }
   } catch (err) {
     alarmWarn.value = true;
     const isAbort = err?.name === "AbortError";
@@ -667,6 +682,8 @@ async function runUpload() {
 
   busy.value = true;
   resetAlarm();
+  stopPreviewTimer();
+  stopStreamRetryTimer();
   stopLiveStream();
   if (selectedImagePreviewUrl.value) {
     frozenInputUrl.value = selectedImagePreviewUrl.value;
@@ -685,7 +702,11 @@ async function runUpload() {
     );
     if (!res.ok) throw new Error(data.detail || "导入图片检测失败");
     applyResult(data);
-    stopAsyncResultTimer();
+    if (data.async_task_id) {
+      startAsyncResultPolling(data.async_task_id);
+    } else {
+      stopAsyncResultTimer();
+    }
     if (selectedImagePreviewUrl.value) {
       URL.revokeObjectURL(selectedImagePreviewUrl.value);
       selectedImagePreviewUrl.value = "";

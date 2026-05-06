@@ -1,5 +1,6 @@
 PyQt6
 opencv-python
+rapidocr-onnxruntime
 Pillow
 ultralytics
 torch

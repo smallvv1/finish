@@ -293,6 +293,16 @@ h2 { margin: 0; font-size: 19px; }
 .table tbody tr:nth-child(odd) { background: rgba(7, 20, 34, 0.56); }
 .table tbody tr:nth-child(even) { background: rgba(11, 27, 44, 0.56); }
 
+.ocr-crop {
+  width: 96px;
+  height: 56px;
+  object-fit: contain;
+  display: block;
+  background: rgba(3, 10, 18, 0.72);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
 .t-ok { color: var(--ok); font-weight: 700; }
 .t-warn { color: var(--warn); font-weight: 700; }
 .t-muted { color: var(--muted); }

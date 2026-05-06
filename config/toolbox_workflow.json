@@ -1,7 +1,7 @@
 {
   "capture": {
     "script": "test_hk_opecv.py",
-    "python_executable": "D:/1/new/EzYOLO-main/.venv/Scripts/python.exe",
+    "python_executable": "D:/1/new/2/EzYOLO-main/.venv/Scripts/python.exe",
     "mode": "ultrafast",
     "preview_mode": "ultrafast",
     "script_timeout_sec": 15,
@@ -9,7 +9,7 @@
     "headless": true
   },
   "model": {
-    "path": "D:/1/new/EzYOLO-main/best_last.pt",
+    "path": "D:/1/new/2/EzYOLO-main/best_last.pt",
     "conf_threshold": 0.5,
     "class_conf_thresholds": {
       "die": 0.5,
