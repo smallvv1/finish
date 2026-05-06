@@ -149,11 +149,11 @@ class WorkflowService:
         if self.camera_live_provider == "hik_script":
             self.camera_live_provider = "hik_sdk"
         if self.hik_only_mode:
-            # Keep capture/detect on Hik, but allow preview to use OpenCV when
-            # the Hik streaming SDK is unstable.
+            # In Hik-only mode both capture/detect and realtime preview must use
+            # Hikvision paths; do not fall back to the host webcam.
             if self.camera_provider not in {"hik_script", "hik_sdk"}:
                 self.camera_provider = "hik_sdk"
-            if self.camera_live_provider in {"hik_script", ""}:
+            if self.camera_live_provider not in {"hik_script", "hik_sdk"}:
                 self.camera_live_provider = "hik_sdk"
         self.camera_source = str(self.cfg.get("camera", {}).get("source", "")).strip()
         self.camera_source_prefer = bool(self.cfg.get("camera", {}).get("source_prefer", True))
@@ -1203,6 +1203,10 @@ class WorkflowService:
                 raise RuntimeError(f"Hik realtime stream open failed: {last_error}")
             raise RuntimeError("Hik realtime stream is initializing")
         if str(self.camera_live_provider).lower() not in {"hik_script", "hik_sdk"}:
+            if self.hik_only_mode:
+                raise RuntimeError(
+                    f"live_provider={self.camera_live_provider} is disabled in hik_only_mode"
+                )
             return self._capture_cv_stream_frame(camera_index, self.camera_live_provider)
         try:
             return self._get_live_frame_by_provider(camera_index, self.camera_live_provider)

@@ -31,7 +31,7 @@
   "camera": {
     "hik_only_mode": true,
     "provider": "hik_sdk",
-    "live_provider": "opencv",
+    "live_provider": "hik_sdk",
     "camera_index": 0,
     "source": "",
     "source_prefer": false,
