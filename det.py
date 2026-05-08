@@ -19,7 +19,7 @@ SLOT_ORDER_INDEX = {code: idx for idx, code in enumerate(SLOT_CODE_ORDER)}
 class RapidDigitOCR:
     """RapidOCR based recognizer for die number crops."""
 
-    def __init__(self, text_score: float = 0.8, code_prefix: str = "TH") -> None:
+    def __init__(self, text_score: float = 0.6, code_prefix: str = "TH") -> None:
         self.text_score = float(text_score)
         self.code_prefix = str(code_prefix).upper()
         self.ocr = RapidOCR(text_score=self.text_score)

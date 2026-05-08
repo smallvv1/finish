@@ -4,7 +4,9 @@
     "python_executable": "D:/1/new/2/EzYOLO-main/.venv/Scripts/python.exe",
     "mode": "ultrafast",
     "preview_mode": "ultrafast",
-    "script_timeout_sec": 15,
+    "script_timeout_sec": 120,
+    "preview_fps": 120,
+    "preview_interval_sec": 0.0083,
     "count": 1,
     "headless": true
   },
@@ -13,7 +15,7 @@
     "conf_threshold": 0.5,
     "class_conf_thresholds": {
       "die": 0.5,
-      "tool": 0.6,
+      "tool": 0.5,
       "pin": 0.5
     }
   },

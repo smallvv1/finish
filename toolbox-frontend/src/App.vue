@@ -265,7 +265,9 @@ let previewTimer = null;
 let streamRetryTimer = null;
 let asyncResultTimer = null;
 let streamLoadWatchdogTimer = null;
+let liveFrameTimer = null;
 const liveStreamUrl = ref("");
+const liveFrameUrl = ref("");
 const useSnapshotPreview = ref(false);
 const previewInFlight = ref(false);
 const streamBroken = ref(false);
@@ -274,7 +276,8 @@ const apiBase = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/+$/, "");
 const CAMERA_DETECT_TIMEOUT_MS = 60000;
 const UPLOAD_DETECT_TIMEOUT_MS = 60000;
 const FORCE_PREVIEW_POLLING = false;
-const PREVIEW_POLL_INTERVAL_MS = 1500;
+const DISABLE_CAMERA_PREVIEW = false;
+const PREVIEW_POLL_INTERVAL_MS = 180;
 const hasAnyMissing = computed(
   () => missingTotalItems.value > 0 || missingTotalCodes.value > 0,
 );
@@ -290,18 +293,8 @@ function withTs(url) {
 }
 
 const inputImageUrl = computed(() => {
-  if (FORCE_PREVIEW_POLLING && !useSnapshotPreview.value) {
-    if (selectedImagePreviewUrl.value) return selectedImagePreviewUrl.value;
-    if (frozenInputUrl.value) return frozenInputUrl.value;
-    if (captureImageUrl.value) return captureImageUrl.value;
-    return "";
-  }
-  // Realtime mode: always prioritize live stream on the left panel.
-  if (!useSnapshotPreview.value && liveStreamUrl.value && !streamBroken.value)
-    return liveStreamUrl.value;
   if (selectedImagePreviewUrl.value) return selectedImagePreviewUrl.value;
-  if (frozenInputUrl.value) return frozenInputUrl.value;
-  if (liveStreamUrl.value && !streamBroken.value) return liveStreamUrl.value;
+  if (!DISABLE_CAMERA_PREVIEW && !useSnapshotPreview.value) return liveFrameUrl.value;
   if (captureImageUrl.value) return captureImageUrl.value;
   return "";
 });
@@ -419,6 +412,7 @@ function onChooseFile(e) {
 }
 
 function resetLiveStream() {
+  if (DISABLE_CAMERA_PREVIEW) return;
   const idx = Number(cameraIndex.value || 0);
   streamBroken.value = false;
   liveStreamUrl.value = withTs(apiUrl(`/api/live-stream?camera_index=${idx}`));
@@ -426,13 +420,12 @@ function resetLiveStream() {
     window.clearTimeout(streamLoadWatchdogTimer);
     streamLoadWatchdogTimer = null;
   }
-  // Some browsers keep MJPEG request pending even when no frame is produced.
-  // If no frame loads quickly, force fallback mode.
+  // Give MJPEG enough time to deliver its first frame before fallback polling.
   streamLoadWatchdogTimer = window.setTimeout(() => {
     if (!useSnapshotPreview.value && liveStreamUrl.value) {
       streamBroken.value = true;
     }
-  }, 1800);
+  }, 5000);
 }
 
 function stopLiveStream() {
@@ -444,8 +437,13 @@ async function onInputImageError() {
     window.clearTimeout(streamLoadWatchdogTimer);
     streamLoadWatchdogTimer = null;
   }
+  if (liveFrameUrl.value && !selectedImagePreviewUrl.value) {
+    liveFrameUrl.value = "";
+  }
   if (!liveStreamUrl.value) return;
-  streamBroken.value = true;
+  if (useSnapshotPreview.value) {
+    streamBroken.value = true;
+  }
   startStreamRetryTimer();
 }
 
@@ -467,6 +465,26 @@ function stopPreviewTimer() {
   }
 }
 
+function stopLiveFrameTimer() {
+  if (liveFrameTimer) {
+    window.clearInterval(liveFrameTimer);
+    liveFrameTimer = null;
+  }
+}
+
+function refreshLiveFrame() {
+  if (DISABLE_CAMERA_PREVIEW) return;
+  if (useSnapshotPreview.value || selectedImagePreviewUrl.value) return;
+  const idx = Number(cameraIndex.value || 0);
+  liveFrameUrl.value = withTs(apiUrl(`/api/live-frame?camera_index=${idx}`));
+}
+
+function startLiveFrameTimer() {
+  stopLiveFrameTimer();
+  refreshLiveFrame();
+  liveFrameTimer = window.setInterval(refreshLiveFrame, 120);
+}
+
 function startPreviewFallbackTimer() {
   stopPreviewTimer();
   previewTimer = window.setInterval(
@@ -478,9 +496,9 @@ function startPreviewFallbackTimer() {
         return;
       }
       if (!streamBroken.value) return;
-      await primeInputFrame(1000);
+      await primeInputFrame(500);
     },
-    FORCE_PREVIEW_POLLING ? PREVIEW_POLL_INTERVAL_MS : 700,
+    FORCE_PREVIEW_POLLING ? PREVIEW_POLL_INTERVAL_MS : 180,
   );
 }
 
@@ -534,9 +552,8 @@ function startStreamRetryTimer() {
   stopStreamRetryTimer();
   streamRetryTimer = window.setInterval(() => {
     if (useSnapshotPreview.value) return;
-    if (!streamBroken.value) return;
     resetLiveStream();
-  }, 1200);
+  }, 800);
 }
 
 async function primeInputFrame(timeoutMs = 2500) {
@@ -568,29 +585,31 @@ async function primeInputFrame(timeoutMs = 2500) {
 
 function startPreview() {
   stopPreviewTimer();
+  stopLiveFrameTimer();
+  stopStreamRetryTimer();
+  stopLiveStream();
+  liveFrameUrl.value = "";
+  if (DISABLE_CAMERA_PREVIEW) return;
   if (useSnapshotPreview.value) {
-    stopStreamRetryTimer();
-    stopLiveStream();
     // In hik_script mode, never auto-capture in background.
     // Capture only when user explicitly clicks detect.
     return;
   }
   if (FORCE_PREVIEW_POLLING) {
-    stopStreamRetryTimer();
-    stopLiveStream();
     // Continuous preview via live-preview polling.
     startPreviewFallbackTimer();
     primeInputFrame(800);
     return;
   }
-  resetLiveStream();
-  startStreamRetryTimer();
-  startPreviewFallbackTimer();
+  stopStreamRetryTimer();
+  stopLiveStream();
+  startLiveFrameTimer();
 }
 
 function handleVisibilityChange() {
   if (document.hidden) {
     stopPreviewTimer();
+    stopLiveFrameTimer();
     stopStreamRetryTimer();
     stopLiveStream();
     return;
@@ -603,40 +622,18 @@ async function runCamera() {
   busy.value = true;
   resetAlarm();
   stopPreviewTimer();
+  stopLiveFrameTimer();
   stopStreamRetryTimer();
   stopLiveStream();
+  liveFrameUrl.value = "";
   if (useSnapshotPreview.value) {
     for (let i = 0; i < 20 && previewInFlight.value; i += 1) {
       // Wait briefly for an inflight preview capture to finish to avoid camera contention.
       await new Promise((resolve) => window.setTimeout(resolve, 50));
     }
   }
-  try {
-    const idx = Number(cameraIndex.value || 0);
-    if (useSnapshotPreview.value) {
-      // Snapshot mode: best-effort frame bootstrap.
-      const previewTimeout = 1200;
-      const { res: pRes, data: pData } = await fetchJsonWithTimeout(
-        apiUrl("/api/live-preview"),
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ camera_index: idx }),
-        },
-        previewTimeout,
-      );
-      if (pRes.ok && pData?.capture_image_url) {
-        const frameUrl = withTs(apiUrl(pData.capture_image_url));
-        captureImageUrl.value = frameUrl;
-        frozenInputUrl.value = frameUrl;
-      } else if (captureImageUrl.value) {
-        frozenInputUrl.value = captureImageUrl.value;
-      }
-    }
-  } catch (_e) {
-    if (captureImageUrl.value) {
-      frozenInputUrl.value = captureImageUrl.value;
-    }
+  if (useSnapshotPreview.value && captureImageUrl.value) {
+    frozenInputUrl.value = captureImageUrl.value;
   }
   try {
     const { res, data } = await fetchJsonWithTimeout(
@@ -683,8 +680,10 @@ async function runUpload() {
   busy.value = true;
   resetAlarm();
   stopPreviewTimer();
+  stopLiveFrameTimer();
   stopStreamRetryTimer();
   stopLiveStream();
+  liveFrameUrl.value = "";
   if (selectedImagePreviewUrl.value) {
     frozenInputUrl.value = selectedImagePreviewUrl.value;
   }
@@ -757,6 +756,7 @@ onMounted(async () => {
 onUnmounted(() => {
   if (timer) window.clearInterval(timer);
   stopPreviewTimer();
+  stopLiveFrameTimer();
   stopStreamRetryTimer();
   stopAsyncResultTimer();
   document.removeEventListener("visibilitychange", handleVisibilityChange);

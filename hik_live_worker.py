@@ -29,12 +29,6 @@ def _open_camera(device_index: int, args):
     print("[LIVE] enumerating Hik devices", flush=True)
     device_list = hk.MV_CC_DEVICE_INFO_LIST()
     n_layer_type = hk.MV_GIGE_DEVICE | hk.MV_USB_DEVICE
-    gntl = getattr(hk, "MV_GENTL_CAMERALINK_DEVICE", None)
-    if gntl is not None:
-        n_layer_type |= gntl
-    cameralink = getattr(hk, "MV_CAMERALINK_DEVICE", None)
-    if cameralink is not None:
-        n_layer_type |= cameralink
 
     ret = hk.MvCamera.MV_CC_EnumDevices(n_layer_type, device_list)
     if ret != 0:
@@ -52,15 +46,24 @@ def _open_camera(device_index: int, args):
         raise RuntimeError(f"Create handle failed: ret={ret}")
 
     open_ret = -1
-    for _ in range(5):
-        open_ret = camera.MV_CC_OpenDevice()
+    open_logs = []
+    access_modes = [
+        ("Exclusive", getattr(hk, "MV_ACCESS_Exclusive", 1)),
+        ("Control", getattr(hk, "MV_ACCESS_Control", 3)),
+    ]
+    for mode_name, access_mode in access_modes:
+        for _ in range(3):
+            open_ret = camera.MV_CC_OpenDevice(int(access_mode), 0)
+            open_logs.append(f"{mode_name}:{open_ret}")
+            if open_ret == 0:
+                print(f"[LIVE] device opened with {mode_name} access", flush=True)
+                break
+            time.sleep(0.2)
         if open_ret == 0:
             break
-        time.sleep(0.2)
     if open_ret != 0:
         camera.MV_CC_DestroyHandle()
-        raise RuntimeError(f"Open device failed: ret={open_ret}")
-    print("[LIVE] device opened", flush=True)
+        raise RuntimeError(f"Open device failed: ret={open_ret}; tries={', '.join(open_logs)}")
 
     if args.auto_exposure:
         camera.MV_CC_SetEnumValue("ExposureAuto", 2)
@@ -134,7 +137,7 @@ def main() -> None:
 
     out = Path(args.output).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_suffix(out.suffix + ".tmp")
+    tmp = out.with_name(f"{out.stem}.tmp{out.suffix}")
     interval = 1.0 / max(1.0, float(args.fps))
 
     camera = None
@@ -157,10 +160,18 @@ def main() -> None:
                 if frame is not None:
                     ok = cv2.imwrite(str(tmp), frame, [int(cv2.IMWRITE_JPEG_QUALITY), int(args.jpeg_quality)])
                     if ok:
-                        os.replace(str(tmp), str(out))
-                        if frame_count == 0:
-                            print(f"[LIVE] first frame saved: {out}", flush=True)
-                        frame_count += 1
+                        replaced = False
+                        for _ in range(5):
+                            try:
+                                os.replace(str(tmp), str(out))
+                                replaced = True
+                                break
+                            except PermissionError:
+                                time.sleep(0.02)
+                        if replaced:
+                            if frame_count == 0:
+                                print(f"[LIVE] first frame saved: {out}", flush=True)
+                            frame_count += 1
             dt = time.perf_counter() - t0
             if dt < interval:
                 time.sleep(interval - dt)

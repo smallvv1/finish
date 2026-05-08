@@ -127,12 +127,6 @@ def main():
 
         device_list = MV_CC_DEVICE_INFO_LIST()
         n_layer_type = MV_GIGE_DEVICE | MV_USB_DEVICE
-        gntl_cameralink_device = globals().get("MV_GENTL_CAMERALINK_DEVICE")
-        if gntl_cameralink_device is not None:
-            n_layer_type |= gntl_cameralink_device
-        mv_cameralink_device = globals().get("MV_CAMERALINK_DEVICE")
-        if mv_cameralink_device is not None:
-            n_layer_type |= mv_cameralink_device
 
         ret = MvCamera.MV_CC_EnumDevices(n_layer_type, device_list)
         if ret != 0:
@@ -153,13 +147,23 @@ def main():
             sys.exit(1)
 
         open_ret = -1
-        for _ in range(5):
-            open_ret = camera.MV_CC_OpenDevice()
+        open_logs = []
+        access_modes = [
+            ("Exclusive", MV_ACCESS_Exclusive),
+            ("Control", MV_ACCESS_Control),
+        ]
+        for mode_name, access_mode in access_modes:
+            for _ in range(3):
+                open_ret = camera.MV_CC_OpenDevice(int(access_mode), 0)
+                open_logs.append(f"{mode_name}:{open_ret}")
+                if open_ret == 0:
+                    print(f"[INFO] Opened device with {mode_name} access")
+                    break
+                time.sleep(0.3)
             if open_ret == 0:
                 break
-            time.sleep(0.3)
         if open_ret != 0:
-            print(f"[ERROR] Open device failed: ret={open_ret}")
+            print(f"[ERROR] Open device failed: ret={open_ret}; tries={', '.join(open_logs)}")
             sys.exit(1)
 
         if args.auto_exposure:
